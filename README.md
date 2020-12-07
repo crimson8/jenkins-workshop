@@ -57,10 +57,11 @@ stage('Build') {
   
 * `04_tests_build_deploy` This pipeline just do two steps different than previous one. Both of these steps are done
  in parallel in the Deploy stage. In the first one the commit get tagged with the same tag as the build has. In the
-  second step the docker build is marked in the kubernetes deployment and then updating kubernetes the updated file. 
+  second step the docker build is marked in the kubernetes deployment and then updating kubernetes the updated file.
   Moreover, this two steps are executed only if the commit was done in the branch Development or
-    Master and aiming to the specific enviroment depending of the tag, so a feature branch could not be deployed in. 
-*`05_split_stages_for_manual_individual_call` This example is about having the same approach than in the previous one
+    Master and aiming to the specific enviroment depending of the tag, so a feature branch could not be deployed in.
+
+* `05_split_stages_for_manual_individual_call` This example is about having the same approach than in the previous one
  but giving the possibility to run each stage independently, manually and giving the parameters to run such stage.
   * `05_0_general` this is the pipeline that enclose all the stages. So, it will be run automatically depending if
      development or master branch got some commits. And also will give a full overview of all the steps run during
