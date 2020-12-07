@@ -72,10 +72,6 @@ stage('Build') {
 * 0.0.1
     * Basic examples
 
-## Meta
-
-Francisco Estudillo
-
 ## Contributing
 
 1. Fork it
