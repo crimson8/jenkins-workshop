@@ -1,0 +1,127 @@
+#!/bin/groovy
+
+pipeline {
+
+    agent any
+
+    options {
+        skipStagesAfterUnstable()
+    }
+
+    environment {
+        APP_NAME = 'actuator-demo'
+    }
+
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Tests') {
+            steps {
+                build job: '../05_1_tests', propagate: true, wait: true, parameters:[
+                    [$class: 'StringParameterValue', name: 'BRANCH_NAME', value: env.BRANCH_NAME]
+                ]
+            }
+        }
+        stage('Build') {
+            when {
+                expression { return env.BRANCH_NAME.equals('development') || env.BRANCH_NAME.equals('master') }
+            }
+
+            steps {
+                script{
+                    def tagName = getTagName(env.BRANCH_NAME, env.BUILD_NUMBER)
+                    def dockerImageRoute = getDockerImageRoute(APP_NAME, env.BRANCH_NAME, env.BUILD_NUMBER).toString()toLowerCase()
+                    echo "Build: Tag Params: ${tagName}, Image Params: ${dockerImageRoute}, Branch Param: " +
+                                                "${env.BRANCH_NAME}"
+
+                    build job: '../05_2_build_docker', propagate: true, wait: true, parameters:[
+                        [$class: 'StringParameterValue', name: 'BRANCH_NAME', value: env.BRANCH_NAME],
+                        [$class: 'WHideParameterValue', name: 'TAG_NAME', value: tagName],
+                        [$class: 'WHideParameterValue', name: 'DOCKER_IMAGE_ROUTE', value: dockerImageRoute],
+
+                    ]
+                }
+            }
+        }
+
+        stage('Deploy') {
+            when {
+                expression { return env.BRANCH_NAME.equals('development') || env.BRANCH_NAME.equals('master') }
+            }
+
+            steps {
+                script {
+                    def tagName = getTagName(env.BRANCH_NAME, env.BUILD_NUMBER)
+                    def dockerImageRoute = getDockerImageRoute(APP_NAME, env.BRANCH_NAME, env.BUILD_NUMBER).toString().toLowerCase()
+                    echo "Deploy: Tag Params: ${tagName}, Image Params: ${dockerImageRoute}, Branch Param: " +
+                                                "${env.BRANCH_NAME}"
+                    build job: '../05_3_deploy', propagate: true, wait: true, parameters:[
+                        [$class:'BooleanParameterValue', name: 'DEPLOY_DEV', value: (env.DEPLOY_DEV == 'true')],
+                        [$class: 'BooleanParameterValue', name: 'DEPLOY_TEST', value: (env.DEPLOY_TEST == 'true')],
+                        [$class: 'BooleanParameterValue', name: 'DEPLOY_LIVE', value: ( env.DEPLOY_LIVE == 'true')],
+                        [$class: 'StringParameterValue', name: 'Image', value: dockerImageRoute],
+                        [$class: 'StringParameterValue', name: 'Tag', value: tagName]
+                    ]
+                }
+            }
+        }
+
+        stage('Clean Workspace') {
+            agent any
+
+            steps {
+                echo 'cleanWs'
+            }
+            post {
+                always {
+                    cleanWs()
+                }
+            }
+        }
+    }
+}
+
+import static java.util.Calendar.YEAR
+import static java.util.Calendar.MONTH
+import static java.util.Calendar.DAY_OF_MONTH
+
+def getDockerImageRoute(app_name, branch, build_number) {
+    def level = getLevel(branch)
+    def tag = getTagName(branch, build_number)
+    def route = "${app_name}/${level}:${tag}"
+    echo "Image Route: ${route}"
+    return route.toString().toLowerCase()
+}
+
+def getTagName(branch, build_number)  {
+    def level = getLevel(branch)
+    def date = getDate()
+    return "${level}-${date}.${build_number}"
+}
+
+def getLevel(branch) {
+    def level = 'BETA'
+    switch(branch) {
+        case 'development':
+            level = 'SNAPSHOT'
+            break
+        case 'master':
+            level = 'CANDIDATE'
+            break
+    }
+    return level
+}
+
+def getDate() {
+    def today = new Date()
+    def year = "${today[YEAR]}".substring(2)
+    def month = today[MONTH] + 1
+    def day = today[DAY_OF_MONTH]
+    def fixMonth = month < 10 ? "0${month}" : "${month}"
+    return "${year}.${fixMonth}.${day}"
+}

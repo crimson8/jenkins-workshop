@@ -1,0 +1,182 @@
+#!/bin/groovy
+
+properties([
+    parameters([
+        [$class: 'ChoiceParameter', choiceType: 'PT_SINGLE_SELECT', description: 'Select the Image to deploy',
+         filterLength: 1, filterable: true, name: 'Image', randomName: 'choice-parameter-7601235200970',
+         script: [$class: 'GroovyScript',
+                  fallbackScript: [classpath: [], sandbox: false,
+                                   script: "return['Could not get Images']"
+                  ],
+                  script: [classpath: [], sandbox: false,
+                           script: '''
+                        import groovy.json.JsonSlurper
+
+                        def project_name = "actuator-demo"
+                        def docker_image_url = "https://docker_repository_url/_catalog"
+                        def images = ["There is no images created for ${project_name}".toString()]
+
+                        try {
+
+                            def datahub_response = [:]
+                            def http_client = new URL(docker_image_url).openConnection() as HttpURLConnection
+                            http_client.setRequestMethod('GET')
+                            http_client.connect()
+
+                            if (http_client.responseCode == 200) {
+                                datahub_response = new JsonSlurper().parseText(http_client.inputStream.getText('UTF-8'))
+                            } else {
+                                println("HTTP response error")
+                            }
+
+                        if (datahub_response.repositories) {
+                                images = datahub_response.repositories
+                                            .findAll { it.startsWith(project_name) }
+                                            .collect { it.replaceAll("${project_name }/", '') }
+                            }
+
+                            return images
+                        } catch (Exception e) {
+                            println(e)
+                        }
+                    '''
+                  ]
+         ]
+        ],
+        [$class: 'CascadeChoiceParameter', choiceType: 'PT_SINGLE_SELECT', description: 'Select the build Tag to Deploy',
+         filterLength: 1, filterable: true, name: 'Tag', randomName: 'choice-parameter-7601237141171',
+         referencedParameters: 'Image',
+         script: [$class: 'GroovyScript',
+                  fallbackScript: [classpath: [], sandbox: false,
+                                   script: 'return["Could not get tags for Image ${Image}".toString()]'
+                  ],
+                  script: [classpath: [], sandbox: false,
+                           script: '''
+                        import groovy.json.JsonSlurper
+
+                        image = Image.toLowerCase()
+
+                        def docker_image_tags_url = "https://docker_repository_url/actuator-demo/${image}/tags/list"
+                        def tags = ["There is no builds for Image ${Image}".toString()]
+
+                        try {
+
+                            def http_response = [:]
+                            def http_client = new URL(docker_image_tags_url).openConnection() as HttpURLConnection
+                            http_client.setRequestMethod('GET')
+                            http_client.connect()
+
+                            if (http_client.responseCode == 200) {
+                                http_response = new JsonSlurper().parseText(http_client.inputStream.getText('UTF-8'))
+                            } else {
+                                println("HTTP response error")
+                            }
+
+                            if (http_response.tags) {
+                                http_response.tags.sort()
+                                tags = http_response.tags
+                            }
+
+                            return tags
+                        } catch (Exception e) {
+                            println(e)
+                        }
+
+                    '''
+                  ]
+         ]
+        ]
+    ])
+])
+
+pipeline {
+
+    agent any
+
+    options {
+        skipStagesAfterUnstable()
+    }
+
+    environment {
+        APP_NAME = 'actuator-demo'
+    }
+
+    parameters {
+        booleanParam(name: "DEPLOY_DEV", description: "Continuous delivery to DEV", defaultValue: false)
+        booleanParam(name: "DEPLOY_TEST", description: "Continuous delivery to TEST", defaultValue: false)
+        booleanParam(name: "DEPLOY_LIVE", description: "Continuous delivery to LIVE", defaultValue: false)
+    }
+
+    stages {
+        stage('Checkout code') {
+            steps {
+                checkout([$class: 'GitSCM', branches: [[name: params.Tag.toUpperCase()]],
+                          doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [],
+                          userRemoteConfigs: [
+                              [credentialsId: 'github',
+                               url: 'https://github.com/crimson8/jenkins-workshop.git'
+                              ]
+                          ]
+                ])
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            agent any
+            steps {
+                script {
+                    def dockerImageRoute = "${app_name}/${params.Image}:${params.Tag}"
+                    if(!params.Image.isEmpty()) {
+                        dockerImageRoute = params.Image
+                    }
+                    if(params.Image.toUpperCase().contains('SNAPSHOT') || params.DEPLOY_DEV) {
+                        deployTo('dev', dockerImageRoute)
+                    } else if(params.Image.toUpperCase().contains('CANDIDATE') || params.DEPLOY_TEST) {
+                        deployTo('test', dockerImageRoute)
+                    } else if(params.Image.toUpperCase().contains('RELEASE') || params.DEPLOY_LIVE) {
+                        deployTo('live', dockerImageRoute)
+                    }
+                }
+            }
+        }
+    }
+}
+
+def deployTo(environment, image) {
+    echo "Deploy started for Image: ${image} to Target Environment: ${environment}"
+    try {
+        deployToKubernetes(environment, image)
+    }
+    catch (e) {
+        echo "Deployment failed for Image: ${image} to Target Environment: ${environment}"
+        throw e
+    }
+}
+
+def deployToKubernetes(environment, image) {
+    echo "Deployment Started to ${environment}"
+    def kubernetesCrendentials = getKubernetesCredentials(environment)
+    sh "sed -ie 's+IMAGE+${image}+g' k8s/${environment}/deployment.yaml"
+    withCredentials([file(credentialsId: kubernetesCrendentials, variable: 'KUBECONFIG')]) {
+        sh "kubectl apply -f k8s/${environment}/config-map.yaml"
+        sh "kubectl apply -f k8s/${environment}/deployment.yaml"
+        sh "kubectl apply -f k8s/${environment}/service.yaml"
+    }
+}
+
+def getKubernetesCredentials(environment) {
+    def credentials
+    echo "Using ${environment} credentials for Kubernetes"
+    switch(environment) {
+        case 'dev':
+            credentials = 'dev-kubernetes-config'
+            break
+        case 'test':
+            credentials = 'test-kubernetes-config'
+            break
+        default:
+            throw new Exception("The environment with name ${environment} is undefined")
+    }
+    echo "Using ${credentials} for Kubernetes"
+    return credentials
+}

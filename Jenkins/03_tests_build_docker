@@ -1,0 +1,112 @@
+#!/bin/groovy
+
+pipeline {
+
+    agent any
+
+    options {
+        skipStagesAfterUnstable()
+    }
+
+    environment {
+        APP_NAME = 'actuator-demo'
+        DOCKER_REGISTRY = 'https://url_to_docker_registry'
+        DOCKER_CREDENTIALS_ID = 'DockerRepositoryCredentialsId'
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Running Test') {
+            agent {
+                docker {
+                    image 'adoptopenjdk/openjdk15:jdk-15.0.1_9-alpine-slim'
+                    registryUrl DOCKER_REGISTRY
+                    registryCredentialsId DOCKER_CREDENTIALS_ID
+                }
+            }
+
+            environment {
+                JAVA_HOME = '/opt/java/openjdk'
+            }
+
+            steps {
+                sh './gradlew --no-daemon --info --build-cache --parallel test'
+            }
+        }
+
+        stage('Docker Build') {
+            agent any
+
+            steps {
+                script {
+                    def tagName = getTagName(env.BRANCH_NAME)
+                    sh "#!/bin/sh -e\n sed -ie 's+PROJECT_VERSION+${tagName}+g' ./build.gradle"
+                    sh "#!/bin/sh -e\n sed -ie 's+PROJECT_VERSION+${tagName}+g' ./Dockerfile"
+                    def dockerImageRoute = getDockerImageRoute().toString().toLowerCase()
+                    docker.withRegistry("${DOCKER_REGISTRY}", "${DOCKER_CREDENTIALS_ID}") {
+                        dockerImage = docker.build("${dockerImageRoute}", "./")
+                        dockerImage.push 'latest'
+                        dockerImage.push "${tagName.toLowerCase()}"
+                    }
+                }
+            }
+        }
+
+        stage('Clean Workspace') {
+            agent any
+
+            steps {
+                echo 'cleanWs'
+            }
+            post {
+                always {
+                    cleanWs()
+                }
+            }
+        }
+    }
+}
+
+import static java.util.Calendar.YEAR
+import static java.util.Calendar.MONTH
+
+def getDockerImageRoute() {
+    def tagName = getTagName(env.BRANCH_NAME)
+    def level = getLevel(env.BRANCH_NAME)
+    def route = "${APP_NAME}/${level}:${tagName}"
+    echo "Image Route: ${route}"
+    return route
+}
+
+def getTagName(branch)  {
+    def level = getLevel(branch)
+    def date = getDate()
+    return "${level}-${date}.${env.BUILD_NUMBER}"
+}
+
+def getLevel(branch) {
+    def level = 'BETA'
+    switch(branch) {
+        case 'development':
+            level = 'SNAPSHOT'
+            break
+
+        case 'master':
+            level = 'CANDIDATE'
+            break
+    }
+    return level
+}
+
+def getDate() {
+    def today = new Date()
+    def year = "${today[YEAR]}".substring(2)
+    def month = today[MONTH] + 1
+    def fixMonth = month < 10 ? "0${month}" : "${month}"
+    return "${year}.${fixMonth}"
+}

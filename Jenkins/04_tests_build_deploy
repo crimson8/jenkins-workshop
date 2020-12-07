@@ -1,0 +1,190 @@
+#!/bin/groovy
+
+pipeline {
+
+    agent any
+
+    options {
+        skipStagesAfterUnstable()
+    }
+
+    environment {
+        APP_NAME = 'actuator-demo'
+        DOCKER_REGISTRY = 'https://your_docker_registry_url'
+        DOCKER_CREDENTIALS_ID = 'DockerRepositoryCredentialsId'
+    }
+
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Running Test') {
+            agent {
+                docker {
+                    image 'adoptopenjdk/openjdk15:jdk-15.0.1_9-alpine-slim'
+                }
+            }
+
+            environment {
+                JAVA_HOME = '/opt/java/openjdk'
+            }
+
+            steps {
+                sh './gradlew --no-daemon --info --build-cache --parallel test'
+            }
+        }
+
+        stage('Docker Build') {
+            when {
+                expression { return env.BRANCH_NAME.equals('development') || env.BRANCH_NAME.equals('master') }
+            }
+            agent any
+
+            steps {
+                script {
+                    def tagName = getTagName(env.BRANCH_NAME, env.BUILD_NUMBER)
+                    sh "#!/bin/sh -e\n sed -ie 's+PROJECT_VERSION+${tagName}+g' ./build.gradle"
+                    sh "#!/bin/sh -e\n sed -ie 's+PROJECT_VERSION+${tagName}+g' ./Dockerfile"
+                    def dockerImageRoute = getDockerImageRoute(APP_NAME, env.BRANCH_NAME, env.BUILD_NUMBER)
+                    docker.withRegistry("${DOCKER_REGISTRY}", "${DOCKER_CREDENTIALS_ID}") {
+                        dockerImage = docker.build("${dockerImageRoute}", "./")
+                        dockerImage.push 'latest'
+                        dockerImage.push "${tagName.toLowerCase()}"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy') {
+            when {
+                expression { return env.BRANCH_NAME.equals('development') || env.BRANCH_NAME.equals('master') }
+            }
+            parallel {
+                stage('Tagging Commit') {
+                    agent any
+                    steps {
+                        script {
+                            tagCommit(env.BRANCH_NAME, env.BUILD_NUMBER)
+                        }
+                    }
+                }
+
+                stage('Deploy to Kubernetes') {
+                    agent any
+                    steps {
+                        script {
+                            def dockerImageRoute = getDockerImageRoute(APP_NAME, env.BRANCH_NAME, env.BUILD_NUMBER)
+                            if(dockerImageRoute.toUpperCase().contains('SNAPSHOT')) {
+                                deployTo('dev', dockerImageRoute)
+                            } else if(dockerImageRoute.toUpperCase().contains('CANDIDATE')) {
+                                deployTo('test', dockerImageRoute)
+                            } else if(dockerImageRoute.toUpperCase().contains('RELEASE')) {
+                                deployTo('live', dockerImageRoute)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Clean Workspace') {
+            agent any
+
+            steps {
+                echo 'cleanWs'
+            }
+            post {
+                always {
+                    cleanWs()
+                }
+            }
+        }
+    }
+}
+
+import static java.util.Calendar.YEAR
+import static java.util.Calendar.MONTH
+
+def getDockerImageRoute(app_name, branch, build_number) {
+    def level = getLevel(branch)
+    def tag = getTagName(branch, build_number)
+    def route = "${app_name}/${level}:${tag}"
+    echo "Image Route: ${route}"
+    return route.toString().toLowerCase()
+}
+
+def tagCommit(branch, build_number) {
+    def tagName = getTagName(branch, build_number)
+    sh "git tag -a ${tagName} -m 'Tagging commit to ${tagName}'"
+    sh "git push --tags"
+}
+
+def getTagName(branch, build_number)  {
+    def level = getLevel(branch)
+    def date = getDate()
+    return "${level}-${date}.${build_number}"
+}
+
+def getLevel(branch) {
+    def level = 'BETA'
+    switch(branch) {
+        case 'development':
+            level = 'SNAPSHOT'
+            break
+        case 'master':
+            level = 'CANDIDATE'
+            break
+    }
+    return level
+}
+
+def getDate() {
+    def today = new Date()
+    def year = "${today[YEAR]}".substring(2)
+    def month = today[MONTH] + 1
+    def fixMonth = month < 10 ? "0${month}" : "${month}"
+    return "${year}.${fixMonth}"
+}
+
+def deployTo(environment, image) {
+    echo "Deploy started for Image: ${image} to Target Environment: ${environment}"
+    try {
+        deployToKubernetes(environment, image)
+    }
+    catch (e) {
+        echo "Deployment failed for Image: ${image} to Target Environment: ${environment}"
+        throw e
+    }
+}
+
+def deployToKubernetes(environment, image) {
+    echo "Deployment Started to ${environment}"
+    def kubernetesCredentials = getKubernetesCredentials(environment)
+    sh "sed -ie 's+IMAGE+${image}+g' k8s/${environment}/deployment.yaml"
+    withCredentials([file(credentialsId: kubernetesCredentials, variable: 'KUBECONFIG')]) {
+        sh "kubectl --kubeconfig ${KUBECONFIG} apply -f k8s/${environment}/config-map.yaml"
+        sh "kubectl --kubeconfig ${KUBECONFIG} apply -f k8s/${environment}/deployment.yaml"
+        sh "kubectl --kubeconfig ${KUBECONFIG} apply -f k8s/${environment}/service.yaml"
+    }
+}
+
+def getKubernetesCredentials(environment) {
+    def credentials
+    echo "Using ${environment} credentials for Kubernetes"
+    switch(environment) {
+        case 'dev':
+            credentials = 'dev-kubernetes-config'
+            break
+        case 'test':
+            credentials = 'test-kubernetes-config'
+            break
+        default:
+            throw new Exception("The environment with name ${environment} is undefined")
+    }
+    echo "Using ${credentials} for Kubernetes"
+    return credentials
+}

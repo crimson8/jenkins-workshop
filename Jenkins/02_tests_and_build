@@ -1,0 +1,39 @@
+#!/bin/groovy
+
+pipeline {
+    agent {
+        docker {
+            image 'adoptopenjdk/openjdk15:jdk-15.0.1_9-alpine-slim'
+        }
+    }
+
+    options {
+        skipStagesAfterUnstable()
+    }
+
+    environment {
+        APP_NAME = 'actuator-demo'
+        JAVA_HOME = '/opt/java/openjdk'
+    }
+
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Running Test') {
+            steps {
+                sh './gradlew --no-daemon --info --build-cache --parallel test'
+            }
+        }
+
+        stage('Java build') {
+            steps {
+                sh './gradlew --no-daemon --info --build-cache --parallel build'
+            }
+        }
+    }
+}

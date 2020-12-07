@@ -1,0 +1,170 @@
+#!/bin/groovy
+
+properties([
+        parameters([
+                [$class: 'ChoiceParameter', choiceType: 'PT_SINGLE_SELECT', description: 'Select the Branch to build',
+                 filterLength: 1, filterable: true, name: 'BRANCH_NAME', randomName: 'choice-parameter-7601235200070',
+                 script: [$class: 'GroovyScript',
+                          fallbackScript: [classpath: [], sandbox: false,
+                                           script: "return['Not Branch found to build']"
+                          ],
+                          script: [classpath: [], sandbox: false,
+                                   script: '''
+                        import jenkins.model.Jenkins
+
+                        def creds = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(
+                            com.cloudbees.plugins.credentials.common.StandardUsernameCredentials.class,
+                            Jenkins.instance,
+                            null,
+                            null)
+                            for (c in creds) {
+                            if (c.id == "github") {
+                                user = c.username
+                                pass = c.password
+                            }
+                        }
+
+                        def gettags =  ("git ls-remote -h https://${user}:${pass}@github.com/crimson8/jenkins-workshop.git").execute()
+                        return gettags.text.readLines().collect {
+                          it.split()[1].replaceAll('refs/heads/', '').replaceAll('refs/tags/', '').replaceAll("\\\\^\\\\{\\\\}", '')
+                        }
+                    '''
+                          ]
+                 ]
+                ],
+                [$class: 'WHideParameterDefinition', name: 'TAG_NAME', defaultValue: '', description: "Tag Name coming from general pipeline"],
+                [$class: 'WHideParameterDefinition', name: 'DOCKER_IMAGE_ROUTE', defaultValue: '', description: 'Docker Image Route coming from general pipeline'],
+        ])
+])
+
+pipeline {
+
+    agent any
+
+    options {
+        skipStagesAfterUnstable()
+    }
+
+    environment {
+        APP_NAME = 'actuator-demo'
+        DOCKER_REGISTRY = 'https://your_docker_registry_url'
+        DOCKER_CREDENTIALS_ID = 'DockerRepositoryCredentialsId'
+    }
+
+    stages {
+        stage('Checkout code') {
+            steps {
+                checkout([$class: 'GitSCM', branches: [[name: params.BRANCH_NAME]],
+                          doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [],
+                          userRemoteConfigs: [
+                                  [credentialsId: 'github',
+                                   url: 'https://github.com/crimson8/jenkins-workshop.git'
+                                  ]
+                          ]
+                ])
+            }
+        }
+
+        stage('Docker Build') {
+            agent any
+
+            steps {
+                script {
+                    echo "Tag Params: ${params.TAG_NAME}, Image Params: ${params.DOCKER_IMAGE_ROUTE}, Branch Param: " +
+                            "${params.BRANCH_NAME}"
+                    def tagName = getTagName(params.BRANCH_NAME, env.BUILD_NUMBER)
+                    if(!params.TAG_NAME.isEmpty()) {
+                        tagName = params.TAG_NAME
+                    }
+                    sh "#!/bin/sh -e\n sed -ie 's+PROJECT_VERSION+${tagName}+g' ./build.gradle"
+                    sh "#!/bin/sh -e\n sed -ie 's+PROJECT_VERSION+${tagName}+g' ./Dockerfile"
+                    def dockerImageRoute = getDockerImageRoute(params.BRANCH_NAME, env.BUILD_NUMBER).toString().toLowerCase()
+                    if(!params.DOCKER_IMAGE_ROUTE.isEmpty()) {
+                        dockerImageRoute = params.DOCKER_IMAGE_ROUTE
+                    }
+                    docker.withRegistry("${DOCKER_REGISTRY}", "${DOCKER_CREDENTIALS_ID}") {
+                        dockerImage = docker.build("${dockerImageRoute}", "./")
+                        dockerImage.push "${tagName.toLowerCase()}"
+                        dockerImage.push 'latest'
+                    }
+                }
+            }
+        }
+
+        stage('Tagging Commit') {
+            agent any
+            steps {
+                script {
+                    def tagName = getTagName(params.BRANCH_NAME, env.BUILD_NUMBER)
+                    if(!params.TAG_NAME.isEmpty()) {
+                        tagName = params.TAG_NAME
+                    }
+                    tagCommit(tagName)
+                }
+            }
+        }
+
+        stage('Clean Workspace') {
+            agent any
+
+            steps {
+                echo 'cleanWs'
+            }
+            post {
+                always {
+                    cleanWs()
+                }
+            }
+        }
+    }
+}
+
+import static java.util.Calendar.YEAR
+import static java.util.Calendar.MONTH
+import static java.util.Calendar.DAY_OF_MONTH
+
+def tagCommit(tag) {
+    sh "git tag -a ${tag} -m 'Tagging commit to ${tag}'"
+    withCredentials([usernamePassword(credentialsId: 'github',
+            usernameVariable: 'username',
+            passwordVariable: 'password')]){
+        sh("git push --tags https://$username:$password@github.com/crimson8/jenkins-workshop.git")
+    }
+}
+
+def getDockerImageRoute(branch, build_number) {
+    def tagName = getTagName(branch, build_number)
+    def level = getLevel(branch)
+    def route = "${APP_NAME}/${level}:${tagName}"
+    echo "Image Route: ${route}"
+    return route
+}
+
+def getTagName(branch, build_number)  {
+    def level = getLevel(branch)
+    def date = getDate()
+    return "${level}-${date}.${build_number}"
+}
+
+def getLevel(branch) {
+    def level = 'BETA'
+    switch(branch) {
+        case 'development':
+            level = 'SNAPSHOT'
+            break
+
+        case 'master':
+            level = 'CANDIDATE'
+            break
+    }
+    return level
+}
+
+def getDate() {
+    def today = new Date()
+    def year = "${today[YEAR]}".substring(2)
+    def month = today[MONTH] + 1
+    def day = today[DAY_OF_MONTH]
+    def fixMonth = month < 10 ? "0${month}" : "${month}"
+    return "${year}.${fixMonth}.${day}"
+}

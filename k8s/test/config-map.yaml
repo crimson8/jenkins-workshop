@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: actuator-config-map
+  namespace: jenkins-workshop
+data:
+    LOGS_LEVEL: "INFO"

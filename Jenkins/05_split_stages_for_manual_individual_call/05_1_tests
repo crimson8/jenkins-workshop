@@ -1,0 +1,80 @@
+#!/bin/groovy
+properties([
+    parameters([
+        [$class: 'ChoiceParameter', choiceType: 'PT_SINGLE_SELECT', description: 'Select the Branch to build',
+         filterLength: 1, filterable: true, name: 'BRANCH_NAME', randomName: 'choice-parameter-7601235200070',
+         script: [$class: 'GroovyScript',
+                  fallbackScript: [classpath: [], sandbox: false,
+                                   script: "return['Not Branch found to build']"
+                  ],
+                  script: [classpath: [], sandbox: false,
+                           script: '''
+                        import jenkins.model.Jenkins
+
+                        def creds = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(
+                            com.cloudbees.plugins.credentials.common.StandardUsernameCredentials.class,
+                            Jenkins.instance,
+                            null,
+                            null)
+                            for (c in creds) {
+                            if (c.id == "github") {
+                                user = c.username
+                                pass = c.password
+                            }
+                        }
+
+                        def gettags =  ("git ls-remote -h https://${user}:${pass}@github.com/crimson8/jenkins-workshop.git").execute()
+                        return gettags.text.readLines().collect {
+                          it.split()[1].replaceAll('refs/heads/', '').replaceAll('refs/tags/', '').replaceAll("\\\\^\\\\{\\\\}", '')
+                        }
+                    '''
+                  ]
+            ]
+        ],
+    ])
+])
+
+pipeline {
+
+    agent any
+
+    options {
+        skipStagesAfterUnstable()
+    }
+
+    environment {
+        APP_NAME = 'actuator-demo'
+    }
+
+
+    stages {
+        stage('Checkout code') {
+            steps {
+                checkout([$class: 'GitSCM', branches: [[name: params.BRANCH_NAME]],
+                          doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [],
+                          userRemoteConfigs: [
+                              [credentialsId: 'github',
+                               url: 'https://github.com/crimson8/jenkins-workshop.git'
+                              ]
+                          ]
+                ])
+            }
+        }
+
+        stage('Running Test') {
+            agent {
+                docker {
+                    image 'adoptopenjdk/openjdk15:jdk-15.0.1_9-alpine-slim'
+                }
+            }
+
+            environment {
+                JAVA_HOME = '/opt/java/openjdk'
+            }
+
+            steps {
+                sh './gradlew --no-daemon --info --build-cache --parallel test'
+            }
+        }
+    }
+}

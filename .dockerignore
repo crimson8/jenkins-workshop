@@ -1,0 +1,16 @@
+.data/
+.idea/
+.git/
+Jenkins/Jenkinsfile
+Jenkins/
+k8s/
+/**/target/**
+/**/build/**
+database/
+/**/docker-compose*.yml
+/**/docker-compose*.yaml
+.dockerignore
+.editorconfig
+.gitignore
+.project
+Dockerfile
